@@ -196,6 +196,19 @@ CREATE TABLE audit_trails (
     additional   jsonb,
     created_at   timestamptz NOT NULL DEFAULT now()
 );
+
+-- "show full history of this record" — the most common query against this table
+CREATE INDEX idx_audits_entry_object ON audits (entry_object_table, entry_object_id);
+-- "what did this user do"
+CREATE INDEX idx_audits_actor ON audits (actor_table, actor_id);
+-- time-range filtering / pagination / retention cleanup
+CREATE INDEX idx_audits_created_at ON audits (created_at);
+
+-- Postgres does NOT auto-index foreign key columns (unlike MySQL/InnoDB) —
+-- without this, every join from audit_trails back to audits does a seq scan.
+CREATE INDEX idx_audit_trails_audit_id ON audit_trails (audit_id);
+-- "show every change ever made to this record", independent of which action triggered it
+CREATE INDEX idx_audit_trails_object ON audit_trails (object_table, object_id);
 ```
 
 ### Storer
@@ -291,3 +304,5 @@ audit.Configure(auditpkg.NewGormStorer(db), "MyApp")
 
 - Diff skips nested array/object fields — only scalar field changes are tracked per trail.
 - No automatic request-body capture (unlike laravel-audit's `user_request` column) — pass what you need via `Additional`.
+- No GIN index on the `jsonb` columns — add one (`CREATE INDEX ... USING gin (tag)`) only if you actually query by field *inside* tag/additional/before/after, not preemptively.
+- `created_at` uses a plain B-tree index — fine at normal volume. If this table grows into the hundreds of millions of append-only rows, switch it to a BRIN index (`USING brin`) — much smaller and just as fast for a naturally time-ordered table, or partition by month.
