@@ -16,46 +16,96 @@ go get github.com/iqbalatma/go-audit
 
 ## Quick usage
 
-Attach actor & request info to `context.Context` once, in your HTTP middleware:
+Attach actor & request info to `context.Context` once, in your HTTP middleware — how you do that depends on your framework:
+
+### net/http or chi
+
+`Middleware` is ready to use as-is, no glue code needed:
 
 ```go
-func AuditContextMiddleware(next http.Handler) http.Handler {
+r := chi.NewRouter() // or any net/http-compatible router
+r.Use(audit.Middleware)
+
+// actor still needs your own auth middleware, chained after:
+r.Use(func(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        ctx := audit.WithRequestInfo(r.Context(), audit.RequestInfo{
-            IPAddress: r.RemoteAddr,
-            Method:    r.Method,
-            Endpoint:  r.URL.Path,
-            UserAgent: r.UserAgent(),
-        })
         if user := getAuthUser(r); user != nil {
-            ctx = audit.WithActor(ctx, audit.Actor{
-                Table: "users", ID: user.ID, Name: user.Name, Email: user.Email,
-            })
+            ctx := audit.WithActor(r.Context(), audit.Actor{Table: "users", ID: user.ID, Name: user.Name})
+            r = r.WithContext(ctx)
         }
-        next.ServeHTTP(w, r.WithContext(ctx))
+        next.ServeHTTP(w, r)
     })
-}
+})
 ```
 
-Then in your service layer:
+### gin
+
+gin's `*gin.Context` isn't an `http.Handler`, so `Middleware` doesn't plug in directly — but `RequestInfoFromHTTP` does the same IP/method/endpoint parsing, called from your own 3-line middleware:
+
+```go
+func AuditMiddleware() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        ctx := audit.WithRequestInfo(c.Request.Context(), audit.RequestInfoFromHTTP(c.Request))
+        if user := getAuthUser(c); user != nil {
+            ctx = audit.WithActor(ctx, audit.Actor{Table: "users", ID: user.ID, Name: user.Name})
+        }
+        c.Request = c.Request.WithContext(ctx)
+        c.Next()
+    }
+}
+
+r := gin.Default()
+r.Use(AuditMiddleware())
+```
+
+### echo
+
+Same pattern, echo just exposes the request via `c.Request()` instead of a struct field:
+
+```go
+func AuditMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        ctx := audit.WithRequestInfo(c.Request().Context(), audit.RequestInfoFromHTTP(c.Request()))
+        if user := getAuthUser(c); user != nil {
+            ctx = audit.WithActor(ctx, audit.Actor{Table: "users", ID: user.ID, Name: user.Name})
+        }
+        c.SetRequest(c.Request().WithContext(ctx))
+        return next(c)
+    }
+}
+
+e := echo.New()
+e.Use(AuditMiddleware)
+```
+
+None of this requires gin/echo as a dependency of `go-audit` — `RequestInfoFromHTTP` takes a plain `*http.Request`, which both frameworks expose.
+
+Then in your service layer, same regardless of framework:
 
 ```go
 // create — before is nil, full "after" is stored
 audit.Init(ctx, "CREATE_PRODUCT", "create product via ProductService.CreateProduct").
     SetEntryObject("products", product.ID).
-    AddSingleTrail("products", product.ID, nil, toMap(product)).
+    AddSingleTrail("products", product.ID, nil, toMap(product), nil, nil).
     Execute(ctx)
 
-// update — only changed fields are stored
+// update — only changed fields are stored, with a per-trail tag
 audit.Init(ctx, "UPDATE_ROLE", "update role via RoleService.UpdateRole").
     SetEntryObject("roles", role.ID).
-    AddSingleTrail("roles", role.ID, beforeMap, toMap(role)).
+    AddSingleTrail("roles", role.ID, beforeMap, toMap(role), map[string]any{"level": "important"}, nil).
     Execute(ctx)
 
 // relation sync — whole before/after set is stored, no diffing
 audit.Init(ctx, "SYNC_ROLE_PERMISSIONS", "sync role permissions").
     SetEntryObject("roles", roleID).
-    AddRelationalTrail("permissions", before, after).
+    AddRelationalTrail("permissions", before, after, nil, nil).
+    Execute(ctx)
+
+// override the app name for one audit instead of using Configure's default
+audit.Init(ctx, "CREATE_PRODUCT", "create product").
+    SetAppName("Admin Panel").
+    SetEntryObject("products", product.ID).
+    AddSingleTrail("products", product.ID, nil, toMap(product), nil, nil).
     Execute(ctx)
 ```
 
@@ -103,6 +153,8 @@ type AuditTrailModel struct {
     ObjectID    string
     Before      string // JSON
     After       string // JSON
+    Tag         string // JSON
+    Additional  string // JSON
     CreatedAt   time.Time
 }
 
@@ -140,6 +192,8 @@ CREATE TABLE audit_trails (
     object_id    text,
     before       jsonb,
     after        jsonb,
+    tag          jsonb,
+    additional   jsonb,
     created_at   timestamptz NOT NULL DEFAULT now()
 );
 ```
@@ -176,7 +230,7 @@ func (s *GormStorer) Save(ctx context.Context, h goaudit.Header, trails []goaudi
             Message:          h.Message,
             AppName:          h.AppName,
             ActorTable:       h.Actor.Table,
-            ActorID:          fmt.Sprint(h.Actor.ID),
+            ActorID:          idString(h.Actor.ID),
             ActorName:        h.Actor.Name,
             ActorEmail:       h.Actor.Email,
             ActorPhone:       h.Actor.Phone,
@@ -185,7 +239,7 @@ func (s *GormStorer) Save(ctx context.Context, h goaudit.Header, trails []goaudi
             Endpoint:         h.Request.Endpoint,
             UserAgent:        h.Request.UserAgent,
             EntryObjectTable: h.EntryObjectTable,
-            EntryObjectID:    fmt.Sprint(h.EntryObjectID),
+            EntryObjectID:    idString(h.EntryObjectID),
             Tag:              string(tag),
             Additional:       string(additional),
         }
@@ -196,13 +250,17 @@ func (s *GormStorer) Save(ctx context.Context, h goaudit.Header, trails []goaudi
         for _, t := range trails {
             before, _ := json.Marshal(t.Before)
             after, _ := json.Marshal(t.After)
+            tag, _ := json.Marshal(t.Tag)
+            additional, _ := json.Marshal(t.Additional)
 
             trailRow := AuditTrailModel{
                 AuditID:     row.ID,
                 ObjectTable: t.ObjectTable,
-                ObjectID:    fmt.Sprint(t.ObjectID),
+                ObjectID:    idString(t.ObjectID),
                 Before:      string(before),
                 After:       string(after),
+                Tag:         string(tag),
+                Additional:  string(additional),
             }
             if err := tx.Create(&trailRow).Error; err != nil {
                 return err
@@ -210,6 +268,15 @@ func (s *GormStorer) Save(ctx context.Context, h goaudit.Header, trails []goaudi
         }
         return nil
     })
+}
+
+// idString avoids fmt.Sprint(nil) turning into the literal string "<nil>"
+// when an actor or entry object has no id set.
+func idString(id any) string {
+    if id == nil {
+        return ""
+    }
+    return fmt.Sprint(id)
 }
 ```
 
@@ -224,4 +291,3 @@ audit.Configure(auditpkg.NewGormStorer(db), "MyApp")
 
 - Diff skips nested array/object fields — only scalar field changes are tracked per trail.
 - No automatic request-body capture (unlike laravel-audit's `user_request` column) — pass what you need via `Additional`.
-- Actor/tag/additional are per-audit, not per-trail.

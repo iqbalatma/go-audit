@@ -77,6 +77,12 @@ func (a *Audit) SetActor(actor Actor) *Audit {
 	return a
 }
 
+// SetAppName overrides the default app name set via Configure, for this audit only.
+func (a *Audit) SetAppName(name string) *Audit {
+	a.header.AppName = name
+	return a
+}
+
 // SetTag merges into any tags already set — safe to call more than once.
 func (a *Audit) SetTag(tag map[string]any) *Audit {
 	if a.header.Tag == nil {
@@ -98,9 +104,10 @@ func (a *Audit) SetAdditional(additional map[string]any) *Audit {
 // AddSingleTrail diffs before/after and appends only the changed fields.
 // Pass nil for before on create, nil for after on delete — the full value is
 // stored as-is in that case, no trail added when there is no actual change.
-func (a *Audit) AddSingleTrail(table string, id any, before, after any) *Audit {
+// tag/additional are optional, pass nil when not needed.
+func (a *Audit) AddSingleTrail(table string, id any, before, after any, tag, additional map[string]any) *Audit {
 	if before == nil || after == nil {
-		a.trails = append(a.trails, Trail{ObjectTable: table, ObjectID: id, Before: before, After: after})
+		a.trails = append(a.trails, Trail{ObjectTable: table, ObjectID: id, Before: before, After: after, Tag: tag, Additional: additional})
 		return a
 	}
 
@@ -108,14 +115,15 @@ func (a *Audit) AddSingleTrail(table string, id any, before, after any) *Audit {
 	if len(diffBefore) == 0 && len(diffAfter) == 0 {
 		return a
 	}
-	a.trails = append(a.trails, Trail{ObjectTable: table, ObjectID: id, Before: diffBefore, After: diffAfter})
+	a.trails = append(a.trails, Trail{ObjectTable: table, ObjectID: id, Before: diffBefore, After: diffAfter, Tag: tag, Additional: additional})
 	return a
 }
 
 // AddRelationalTrail stores before/after as-is, no diffing — for relation
 // sync/attach/detach where the whole set matters, not per-field changes.
-func (a *Audit) AddRelationalTrail(table string, before, after any) *Audit {
-	a.trails = append(a.trails, Trail{ObjectTable: table, Before: before, After: after})
+// tag/additional are optional, pass nil when not needed.
+func (a *Audit) AddRelationalTrail(table string, before, after any, tag, additional map[string]any) *Audit {
+	a.trails = append(a.trails, Trail{ObjectTable: table, Before: before, After: after, Tag: tag, Additional: additional})
 	return a
 }
 

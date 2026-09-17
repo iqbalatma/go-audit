@@ -29,7 +29,7 @@ func TestDiffMapsSkipsNestedFields(t *testing.T) {
 
 func TestAddSingleTrailNoChangeAddsNoTrail(t *testing.T) {
 	a := &Audit{}
-	a.AddSingleTrail("products", 1, map[string]any{"name": "x"}, map[string]any{"name": "x"})
+	a.AddSingleTrail("products", 1, map[string]any{"name": "x"}, map[string]any{"name": "x"}, nil, nil)
 
 	if len(a.trails) != 0 {
 		t.Fatalf("expected 0 trails when nothing changed, got %d", len(a.trails))
@@ -38,12 +38,21 @@ func TestAddSingleTrailNoChangeAddsNoTrail(t *testing.T) {
 
 func TestAddSingleTrailCreateStoresFullAfter(t *testing.T) {
 	a := &Audit{}
-	a.AddSingleTrail("products", 1, nil, map[string]any{"name": "x"})
+	a.AddSingleTrail("products", 1, nil, map[string]any{"name": "x"}, nil, nil)
 
 	if len(a.trails) != 1 {
 		t.Fatalf("expected 1 trail, got %d", len(a.trails))
 	}
 	if a.trails[0].Before != nil {
 		t.Fatalf("expected nil before on create, got %v", a.trails[0].Before)
+	}
+}
+
+func TestAddSingleTrailStoresPerTrailTag(t *testing.T) {
+	a := &Audit{}
+	a.AddSingleTrail("products", 1, nil, map[string]any{"name": "x"}, map[string]any{"level": "important"}, nil)
+
+	if got := a.trails[0].Tag["level"]; got != "important" {
+		t.Fatalf("trail tag = %v, want important", got)
 	}
 }
